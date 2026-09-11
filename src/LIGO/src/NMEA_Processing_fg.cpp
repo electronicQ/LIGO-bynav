@@ -104,12 +104,12 @@ void NMEAProcess::processNMEA(const nav_msgs::OdometryPtr &nmea_meas, state_outp
   {
 
     //新增: 打印协方差 + 当前窗口累积进度
-    ROS_INFO("[DIAG] processNMEA cov[0]=%.2f cov[1]=%.2f cov[2]=%.2f thres=%.2f | frame_count=%d/%d nmea_ts=%.3f",
-             nmea_meas->pose.covariance[0], nmea_meas->pose.covariance[1],
-             nmea_meas->pose.covariance[2], p_assign->ppp_std_threshold,
+    ROS_INFO("[DIAG] processNMEA cov[0]=%.2f cov[7]=%.2f cov[14]=%.2f thres=%.2f | frame_count=%d/%d nmea_ts=%.3f",
+             nmea_meas->pose.covariance[0], nmea_meas->pose.covariance[7],
+             nmea_meas->pose.covariance[14], p_assign->ppp_std_threshold,
              frame_count, wind_size + 1, nmea_ts);
 
-    if (nmea_meas->pose.covariance[0] > p_assign->ppp_std_threshold || nmea_meas->pose.covariance[1] > p_assign->ppp_std_threshold || nmea_meas->pose.covariance[2] > p_assign->ppp_std_threshold)
+    if (nmea_meas->pose.covariance[0] > p_assign->ppp_std_threshold || nmea_meas->pose.covariance[7] > p_assign->ppp_std_threshold || nmea_meas->pose.covariance[14] > p_assign->ppp_std_threshold)
     {
       ROS_WARN("[DIAG] NMEA 协方差过大被拦截!");   // ← 加这行
       return;
@@ -441,7 +441,7 @@ bool NMEAProcess::NMEALIAlign()
 
 bool NMEAProcess::Evaluate(state_output &state)
 {
-  if (nmea_meas_[0]->pose.covariance[0] > p_assign->ppp_std_threshold || nmea_meas_[0]->pose.covariance[1] > p_assign->ppp_std_threshold || nmea_meas_[0]->pose.covariance[2] > p_assign->ppp_std_threshold)
+  if (nmea_meas_[0]->pose.covariance[0] > p_assign->ppp_std_threshold || nmea_meas_[0]->pose.covariance[7] > p_assign->ppp_std_threshold || nmea_meas_[0]->pose.covariance[14] > p_assign->ppp_std_threshold)
   {
     return false;
   }

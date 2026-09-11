@@ -85,7 +85,7 @@ gnss:
 nmea:
     nmea_enable: true # enable fuse ppp results of gnss observations
     posit_odo_topic: "/rtk/gps_odom" # "/mavros/local_position/odom" # ppp solutions topic
-    ppp_std_thres: 1000.0 # ppp solution std thred
+    ppp_std_thres: 1000.0 # ppp solution std thred（方差大于1000.0的数据才会被抛弃，所以LIGO内部不会抛弃gnss_to_enu处理后的数据）
     pos_noise: 1 # factor cov for position factors
     nmea_weight: 100.0 
     init_svd_min_distance: 0.35 # meters, SVD init keyframe spacing

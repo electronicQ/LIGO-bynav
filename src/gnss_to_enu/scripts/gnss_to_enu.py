@@ -122,8 +122,12 @@ class GNSSToENU:
 
         # # 驱动中 Fix 为 0.0004，Float 为 0.04
         # # 这里阈值设为 0.005，确保安全的 Float 不会被熔断，同时挡住真正的劣质数据0.005
-        if rtk_var_x > 2.0:
-            rospy.logwarn_throttle(2.0, f" [GNSS2ENU] Low accuracy (Var:{rtk_var_x:.4f}). Ignoring.")
+        if rtk_var_x > 2.0 or rtk_var_y > 2.0 or rtk_var_z > 2.0:
+            rospy.logwarn_throttle(
+                2.0,
+                f" [GNSS2ENU] Low accuracy "
+                f"(Var X:{rtk_var_x:.4f}, Y:{rtk_var_y:.4f}, Z:{rtk_var_z:.4f}). Ignoring."
+            )
             return
         
         #============================================
