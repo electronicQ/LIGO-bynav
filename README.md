@@ -1,6 +1,6 @@
-# LIGO 北云 GNSS + Livox 激光雷达建图工作区
+# LIGO 北云 GNSS + Livox 激光雷达建图工程
 
-这是一个基于 ROS1 的多传感器建图工作区，当前主要用于将北云 GNSS、Livox LiDAR/IMU 和 LIGO 建图算法组合起来，形成带 UTC 时间戳的外部 GNSS ENU 里程计，并参与 LIGO 的全局定位与建图。
+这是一个基于 ROS1 的多传感器建图工程，请在ros工作空间文件夹下进行git clone，当前主要用于将北云 GNSS、Livox LiDAR/IMU 和 LIGO 建图算法组合起来，形成带 UTC 时间戳的外部 GNSS ENU 里程计，并参与 LIGO 的全局定位与建图，最终建立局部camear_init系以及ENU坐标系下的两种点云地图，同时输出ENU坐标系原点的经纬高。
 
 ## 系统流程
 
