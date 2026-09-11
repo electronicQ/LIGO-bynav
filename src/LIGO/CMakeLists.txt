@@ -65,6 +65,7 @@ find_package(GTSAM REQUIRED QUIET)
 find_package(PCL 1.8 REQUIRED)
 find_package(Ceres REQUIRED)
 find_package(Sophus REQUIRED)
+find_package(GTSAM REQUIRED)
 
 message(Eigen: ${EIGEN3_INCLUDE_DIR})
 

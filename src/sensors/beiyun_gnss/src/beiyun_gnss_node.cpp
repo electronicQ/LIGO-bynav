@@ -18,7 +18,6 @@
 #include <sensor_msgs/NavSatStatus.h>
 #include <std_msgs/String.h>
 
-#include "beiyun_gnss/covariance_policy.h"
 #include "beiyun_gnss/nmea_parser.h"
 
 namespace {
@@ -63,6 +62,11 @@ ros::Time ToRosTime(const beiyun_gnss::UtcTime &utc) {
 // 只用于快速路由语句类型，真正的数据合法性由 nmea_parser 校验。
 bool IsPrefixed(const std::string &line, const char *prefix) {
   return line.compare(0, std::strlen(prefix), prefix) == 0;
+}
+
+bool IsNmeaType(const std::string &line, const char *type) {
+  return line.size() >= 6 && line[0] == '$' &&
+         line.compare(3, 3, type) == 0;
 }
 
 // POSIX 串口封装：负责打开设备、配置 8N1/波特率/超时、读取字节和关闭设备。
@@ -132,7 +136,7 @@ class SerialPort {
   int fd_;
 };
 
-// 北云 GNSS ROS 节点：串口读取、语句缓存、GGA/RMC 配对和 ROS 发布均在此完成。
+// 北云 GNSS ROS 节点：串口读取、BESTPOSA/RMC 配对和 ROS 发布均在此完成。
 class BeiyunGnssNode {
  public:
   BeiyunGnssNode()
@@ -144,9 +148,8 @@ class BeiyunGnssNode {
         frame_id_("gps"),
         navsatfix_topic_("/rtk/navsatfix"),
         pair_tolerance_seconds_(0.2),
-        covariance_config_(),
         has_rmc_(false),
-        has_gga_(false) {
+        has_bestpos_(false) {
     // 私有参数允许在端口映射前后使用同一个程序，不需要重新编译。
     private_nh_.param("port", port_, port_);
     private_nh_.param("baudrate", baudrate_, baudrate_);
@@ -155,18 +158,6 @@ class BeiyunGnssNode {
     private_nh_.param("navsatfix_topic", navsatfix_topic_, navsatfix_topic_);
     private_nh_.param("pair_tolerance_seconds", pair_tolerance_seconds_,
               pair_tolerance_seconds_);
-    private_nh_.param("single_point_covariance_m2",
-              covariance_config_.single_point_covariance_m2,
-              covariance_config_.single_point_covariance_m2);
-    private_nh_.param("dgps_covariance_m2", covariance_config_.dgps_covariance_m2,
-              covariance_config_.dgps_covariance_m2);
-    private_nh_.param("rtk_fixed_covariance_m2",
-              covariance_config_.rtk_fixed_covariance_m2,
-              covariance_config_.rtk_fixed_covariance_m2);
-    private_nh_.param("rtk_float_covariance_m2",
-              covariance_config_.rtk_float_covariance_m2,
-              covariance_config_.rtk_float_covariance_m2);
-
     // NavSatFix 是融合后的正式输出；三个 raw 话题用于现场排查串口内容。
     navsatfix_pub_ = nh_.advertise<sensor_msgs::NavSatFix>(navsatfix_topic_, 10);
     raw_rmc_pub_ = nh_.advertise<std_msgs::String>("/rtk/raw_rmc", 10);
@@ -205,7 +196,8 @@ class BeiyunGnssNode {
         serial_.Close();
         receive_buffer_.clear();
         has_rmc_ = false;
-        has_gga_ = false;
+        has_bestpos_ = false;
+        last_published_stamp_ = ros::Time(0);
       }
       ros::spinOnce();
       loop_rate.sleep();
@@ -231,12 +223,12 @@ class BeiyunGnssNode {
     }
   }
 
-  // 先按语句类型发布原始文本，再把有效 GGA/RMC 放入配对缓存。
-  // BESTPOSA 没有直接参与 NavSatFix 组装，仅保留供诊断使用。
+  // RMC 提供完整 UTC 时间；BESTPOSA 提供位置、状态和真实精度。
+  // GGA 只保留原始话题，不参与正式 NavSatFix 组装。
   void HandleLine(const std::string &line) {
     std_msgs::String raw;
     raw.data = line;
-    if (IsPrefixed(line, "$GPRMC") || IsPrefixed(line, "$GNRMC")) {
+    if (IsNmeaType(line, "RMC")) {
       raw_rmc_pub_.publish(raw);
       beiyun_gnss::RmcData parsed;
       if (beiyun_gnss::ParseRmc(line, &parsed)) {
@@ -244,24 +236,25 @@ class BeiyunGnssNode {
         has_rmc_ = true;
         TryPublishFix();
       }
-    } else if (IsPrefixed(line, "$GPGGA") || IsPrefixed(line, "$GNGGA")) {
+    } else if (IsNmeaType(line, "GGA")) {
       raw_gga_pub_.publish(raw);
-      beiyun_gnss::GgaData parsed;
-      if (beiyun_gnss::ParseGga(line, &parsed)) {
-        gga_ = parsed;
-        has_gga_ = true;
-        TryPublishFix();
-      }
     } else if (IsPrefixed(line, "#BESTPOSA")) {
       raw_bestposa_pub_.publish(raw);
+      beiyun_gnss::BestPosData parsed;
+      if (beiyun_gnss::ParseBestPos(line, &parsed)) {
+        bestpos_ = parsed;
+        has_bestpos_ = true;
+        TryPublishFix();
+      }
     }
   }
 
-  // 只有 RMC 和 GGA 的 UTC 时刻匹配时才发布，时间戳使用 RMC 的完整日期时间。
-  // last_published_stamp_ 防止同一组缓存因两条语句到达顺序而重复发布。
+  // 只有时间匹配的 BESTPOSA 和 RMC 才发布，时间戳使用 RMC 的 UTC 时间。
+  // BESTPOSA 的标准差是 sigma，NavSatFix 需要填 sigma^2。
   void TryPublishFix() {
-    if (!has_rmc_ || !has_gga_ ||
-        !beiyun_gnss::UtcClose(rmc_.utc, gga_.utc, pair_tolerance_seconds_)) {
+    if (!has_rmc_ || !has_bestpos_ ||
+        !beiyun_gnss::BestPosTimeClose(
+            bestpos_, rmc_.utc, pair_tolerance_seconds_)) {
       return;
     }
     const ros::Time stamp = ToRosTime(rmc_.utc);
@@ -270,38 +263,40 @@ class BeiyunGnssNode {
     sensor_msgs::NavSatFix message;
     message.header.stamp = stamp;
     message.header.frame_id = frame_id_;
-    message.status.status = StatusForFixQuality(gga_.fix_quality);
+    message.status.status = StatusForBestPos(bestpos_);
     message.status.service = sensor_msgs::NavSatStatus::SERVICE_GPS;
-    message.latitude = gga_.latitude;
-    message.longitude = gga_.longitude;
-    message.altitude = gga_.altitude;
-    // 根据 GGA quality 选择对应方差，并填入 east/north/up 三个对角元素。
-    message.position_covariance.fill(0.0);
-    const double covariance = beiyun_gnss::CovarianceForFixQuality(
-        gga_.fix_quality, covariance_config_);
-    if (covariance > 0.0 && std::isfinite(covariance)) {
-      message.position_covariance[0] = covariance;
-      message.position_covariance[4] = covariance;
-      message.position_covariance[8] = covariance;
-      message.position_covariance_type =
-          sensor_msgs::NavSatFix::COVARIANCE_TYPE_DIAGONAL_KNOWN;
-    } else {
-      message.position_covariance_type =
-          sensor_msgs::NavSatFix::COVARIANCE_TYPE_UNKNOWN;
-    }
+    message.latitude = bestpos_.latitude;
+    message.longitude = bestpos_.longitude;
+    message.altitude = bestpos_.altitude;
+    // BESTPOSA 的 lon/lat/hgt sigma 分别对应 ENU 的 east/north/up。
+    message.position_covariance[0] =
+        bestpos_.longitude_stddev * bestpos_.longitude_stddev;
+    message.position_covariance[4] =
+        bestpos_.latitude_stddev * bestpos_.latitude_stddev;
+    message.position_covariance[8] =
+        bestpos_.altitude_stddev * bestpos_.altitude_stddev;
+    message.position_covariance_type =
+        sensor_msgs::NavSatFix::COVARIANCE_TYPE_DIAGONAL_KNOWN;
     navsatfix_pub_.publish(message);
     last_published_stamp_ = stamp;
+    has_rmc_ = false;
+    has_bestpos_ = false;
   }
 
-  // 将 GGA fix quality 映射为 sensor_msgs/NavSatStatus 状态码。
-  static int8_t StatusForFixQuality(int quality) {
-    switch (quality) {
-      case 2: return sensor_msgs::NavSatStatus::STATUS_SBAS_FIX;
-      case 4:
-      case 5: return sensor_msgs::NavSatStatus::STATUS_GBAS_FIX;
-      case 1: return sensor_msgs::NavSatStatus::STATUS_FIX;
-      default: return sensor_msgs::NavSatStatus::STATUS_NO_FIX;
+  // NavSatStatus 没有 RTK 专用枚举：普通单点映射为 FIX，差分/RTK
+  // 映射为 GBAS_FIX，只有明确无效解才映射为 NO_FIX。
+  static int8_t StatusForBestPos(
+      const beiyun_gnss::BestPosData &bestpos) {
+    if (bestpos.sol_status != "SOL_COMPUTED") {
+      return sensor_msgs::NavSatStatus::STATUS_NO_FIX;
     }
+    if (bestpos.pos_type == "SINGLE") {
+      return sensor_msgs::NavSatStatus::STATUS_FIX;
+    }
+    if (bestpos.pos_type == "WAAS") {
+      return sensor_msgs::NavSatStatus::STATUS_SBAS_FIX;
+    }
+    return sensor_msgs::NavSatStatus::STATUS_GBAS_FIX;
   }
 
   // ROS、串口和参数
@@ -314,13 +309,12 @@ class BeiyunGnssNode {
   std::string frame_id_;
   std::string navsatfix_topic_;
   double pair_tolerance_seconds_;
-  beiyun_gnss::CovarianceConfig covariance_config_;
-  // 串口字节流和最近一条有效 GGA/RMC
+  // 串口字节流和最近一条有效 BESTPOSA/RMC
   std::string receive_buffer_;
   beiyun_gnss::RmcData rmc_;
-  beiyun_gnss::GgaData gga_;
+  beiyun_gnss::BestPosData bestpos_;
   bool has_rmc_;
-  bool has_gga_;
+  bool has_bestpos_;
   ros::Time last_published_stamp_;
   // ROS 发布器
   ros::Publisher navsatfix_pub_;

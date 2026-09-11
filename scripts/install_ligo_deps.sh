@@ -28,6 +28,7 @@ APT_PACKAGES=(
     libpcl-dev        # PCL 1.8+
     libfmt-dev        # Sophus 隐式依赖
     libdw-dev         # GTSAM/Ceres Profiling 依赖 (libdw)
+    libsuitesparse-dev
 )
 
 log_info "正在通过 apt 安装系统依赖..."
