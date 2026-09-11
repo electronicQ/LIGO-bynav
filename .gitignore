@@ -1,0 +1,66 @@
+# ROS/catkin build products
+build/
+devel/
+install/
+log/
+.catkin_workspace
+.catkin_tools/
+
+# CMake and compiler-generated files
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+compile_commands.json
+*.so
+*.so.*
+*.a
+*.o
+*.lo
+*.la
+
+# ROS runtime data
+*.bag
+*.bag.active
+*.db3
+rosout.log
+
+# Python cache and local environments
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+env/
+ENV/
+
+# IDE and editor files
+.idea/
+.vscode/
+*.code-workspace
+*.swp
+*.swo
+*~
+
+# OS metadata
+.DS_Store
+Thumbs.db
+
+# Local configuration and secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.secret
+secrets/
+
+# Test and coverage output
+.pytest_cache/
+.coverage
+htmlcov/
+coverage.xml
+
+# Temporary files and generated logs
+*.log
+tmp/
+temp/

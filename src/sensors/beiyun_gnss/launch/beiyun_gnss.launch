@@ -1,0 +1,20 @@
+<launch>
+  <!-- 北云 C2 COM3 经 USB 转串口后当前设备名；完成 udev 映射后修改此值。 -->
+  <node pkg="beiyun_gnss" type="beiyun_gnss_node" name="beiyun_gnss" output="screen">
+    <param name="port" value="/dev/ttyACM1" />
+    <!-- C2 COM3 的串口通信参数。 -->
+    <param name="baudrate" value="115200" />
+    <param name="serial_timeout" value="0.1" />
+    <!-- NavSatFix 的坐标参考坐标系名称。 -->
+    <param name="frame_id" value="gps" />
+    <!-- RMC/GGA 配对后的正式输出话题。 -->
+    <param name="navsatfix_topic" value="/rtk/navsatfix" />
+    <!-- 两条语句的 UTC 时刻允许存在的最大偏差，单位秒。 -->
+    <param name="pair_tolerance_seconds" value="0.2" />
+    <!-- 以下为各解类型使用的位置方差，单位 m^2；将填入 ENU 对角线。 -->
+    <param name="single_point_covariance_m2" value="25.0" />
+    <param name="dgps_covariance_m2" value="1.0" />
+    <param name="rtk_fixed_covariance_m2" value="0.0004" />
+    <param name="rtk_float_covariance_m2" value="0.04" />
+  </node>
+</launch>
