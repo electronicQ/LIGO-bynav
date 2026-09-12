@@ -148,6 +148,8 @@ class BeiyunGnssNode {
         frame_id_("gps"),
         navsatfix_topic_("/rtk/navsatfix"),
         pair_tolerance_seconds_(0.2),
+        timestamp_source_("gprmc_utc"),
+        signal_timeout_seconds_(2.0),
         has_rmc_(false),
         has_bestpos_(false) {
     // 私有参数允许在端口映射前后使用同一个程序，不需要重新编译。
@@ -158,6 +160,20 @@ class BeiyunGnssNode {
     private_nh_.param("navsatfix_topic", navsatfix_topic_, navsatfix_topic_);
     private_nh_.param("pair_tolerance_seconds", pair_tolerance_seconds_,
               pair_tolerance_seconds_);
+    private_nh_.param("timestamp_source", timestamp_source_, timestamp_source_);
+    private_nh_.param("signal_timeout_seconds", signal_timeout_seconds_,
+                      signal_timeout_seconds_);
+    if (timestamp_source_ != "gprmc_utc" && timestamp_source_ != "system_now") {
+      ROS_WARN("Unknown timestamp_source '%s'; falling back to gprmc_utc",
+               timestamp_source_.c_str());
+      timestamp_source_ = "gprmc_utc";
+    }
+    if (signal_timeout_seconds_ <= 0.0) {
+      ROS_WARN("signal_timeout_seconds must be positive; using 2.0 seconds");
+      signal_timeout_seconds_ = 2.0;
+    }
+    last_valid_bestpos_wall_time_ = ros::WallTime::now();
+    last_published_wall_time_ = last_valid_bestpos_wall_time_;
     // NavSatFix 是融合后的正式输出；三个 raw 话题用于现场排查串口内容。
     navsatfix_pub_ = nh_.advertise<sensor_msgs::NavSatFix>(navsatfix_topic_, 10);
     raw_rmc_pub_ = nh_.advertise<std_msgs::String>("/rtk/raw_rmc", 10);
@@ -200,6 +216,7 @@ class BeiyunGnssNode {
         last_published_stamp_ = ros::Time(0);
       }
       ros::spinOnce();
+      CheckSignalStatus();
       loop_rate.sleep();
     }
   }
@@ -244,21 +261,45 @@ class BeiyunGnssNode {
       if (beiyun_gnss::ParseBestPos(line, &parsed)) {
         bestpos_ = parsed;
         has_bestpos_ = true;
+        has_valid_bestpos_ever_ = true;
+        last_valid_bestpos_wall_time_ = ros::WallTime::now();
         TryPublishFix();
       }
     }
   }
 
-  // 只有时间匹配的 BESTPOSA 和 RMC 才发布，时间戳使用 RMC 的 UTC 时间。
-  // BESTPOSA 的标准差是 sigma，NavSatFix 需要填 sigma^2。
+  // gprmc_utc 模式保持 BESTPOSA/RMC 配对逻辑；system_now 模式只依赖有效
+  // BESTPOSA。BESTPOSA 的标准差是 sigma，NavSatFix 需要填 sigma^2。
   void TryPublishFix() {
-    if (!has_rmc_ || !has_bestpos_ ||
-        !beiyun_gnss::BestPosTimeClose(
-            bestpos_, rmc_.utc, pair_tolerance_seconds_)) {
+    if (!has_bestpos_) return;
+
+    ros::Time stamp;
+    if (timestamp_source_ == "gprmc_utc") {
+      if (!has_rmc_ ||
+          !beiyun_gnss::BestPosTimeClose(
+              bestpos_, rmc_.utc, pair_tolerance_seconds_)) {
+        return;
+      }
+      stamp = ToRosTime(rmc_.utc);
+      if (!last_published_stamp_.isZero() && stamp == last_published_stamp_) {
+        return;
+      }
+    } else {
+      // 系统时间模式下用 BESTPOSA 的 GNSS 历元去重，不能用 ros::Time::now()
+      // 去重，因为每次发布时系统时间通常都不同。
+      if (has_last_published_bestpos_time_ &&
+          bestpos_.gps_time.week == last_published_bestpos_week_ &&
+          bestpos_.gps_time.seconds == last_published_bestpos_seconds_) {
+        return;
+      }
+      stamp = ros::Time::now();
+    }
+
+    if (stamp.isZero()) {
+      ROS_WARN_THROTTLE(2.0,
+                        "ROS time is zero; NavSatFix timestamp is not valid yet");
       return;
     }
-    const ros::Time stamp = ToRosTime(rmc_.utc);
-    if (!last_published_stamp_.isZero() && stamp == last_published_stamp_) return;
 
     sensor_msgs::NavSatFix message;
     message.header.stamp = stamp;
@@ -279,8 +320,35 @@ class BeiyunGnssNode {
         sensor_msgs::NavSatFix::COVARIANCE_TYPE_DIAGONAL_KNOWN;
     navsatfix_pub_.publish(message);
     last_published_stamp_ = stamp;
+    last_published_wall_time_ = ros::WallTime::now();
+    if (timestamp_source_ == "system_now") {
+      last_published_bestpos_week_ = bestpos_.gps_time.week;
+      last_published_bestpos_seconds_ = bestpos_.gps_time.seconds;
+      has_last_published_bestpos_time_ = true;
+    }
     has_rmc_ = false;
     has_bestpos_ = false;
+  }
+
+  void CheckSignalStatus() {
+    const ros::WallTime now = ros::WallTime::now();
+    const double bestpos_age =
+        (now - last_valid_bestpos_wall_time_).toSec();
+    if (!has_valid_bestpos_ever_ || bestpos_age > signal_timeout_seconds_) {
+      ROS_WARN_THROTTLE(2.0,
+                        "GNSS signal missing or no valid BESTPOSA; "
+                        "cannot publish NavSatFix");
+      return;
+    }
+
+    if (timestamp_source_ == "gprmc_utc" &&
+        (now - last_published_wall_time_).toSec() >
+            signal_timeout_seconds_) {
+      ROS_WARN_THROTTLE(
+          2.0,
+          "Valid BESTPOSA received, but no matching GPRMC; "
+          "cannot publish NavSatFix in gprmc_utc mode");
+    }
   }
 
   // NavSatStatus 没有 RTK 专用枚举：普通单点映射为 FIX，差分/RTK
@@ -309,13 +377,21 @@ class BeiyunGnssNode {
   std::string frame_id_;
   std::string navsatfix_topic_;
   double pair_tolerance_seconds_;
+  std::string timestamp_source_;
+  double signal_timeout_seconds_;
   // 串口字节流和最近一条有效 BESTPOSA/RMC
   std::string receive_buffer_;
   beiyun_gnss::RmcData rmc_;
   beiyun_gnss::BestPosData bestpos_;
   bool has_rmc_;
   bool has_bestpos_;
+  bool has_valid_bestpos_ever_{false};
+  ros::WallTime last_valid_bestpos_wall_time_;
+  ros::WallTime last_published_wall_time_;
   ros::Time last_published_stamp_;
+  bool has_last_published_bestpos_time_{false};
+  int last_published_bestpos_week_{0};
+  double last_published_bestpos_seconds_{0.0};
   // ROS 发布器
   ros::Publisher navsatfix_pub_;
   ros::Publisher raw_rmc_pub_;

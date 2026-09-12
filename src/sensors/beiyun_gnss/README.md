@@ -2,11 +2,18 @@
 
 `beiyun_gnss` 从北云 C2 的串口字节流中读取 ASCII 语句，校验并解析 `#BESTPOSA` 和 `GPRMC/GNRMC`，然后合成为 `sensor_msgs/NavSatFix`。
 
+驱动支持两种 `NavSatFix.header.stamp` 来源：
+
+- `gprmc_utc`：使用 GPRMC 的 UTC 日期和时间，保持当前 BESTPOSA+GPRMC 配对逻辑；
+- `system_now`：使用 `ros::Time::now()`，只要收到有效 BESTPOSA 即可发布。
+
+默认值是 `gprmc_utc`，因此默认行为与现有程序保持一致。
+
 当前正式消息采用：
 
 ```text
 BESTPOSA：经纬度、高程、解状态、位置标准差
-GPRMC：完整 UTC 日期和时间
+GPRMC：gprmc_utc 模式下提供完整 UTC 日期和时间
 GPGGA：仅发布原始诊断话题，不参与正式 NavSatFix 组装
 ```
 
@@ -24,6 +31,8 @@ baudrate = 115200
 frame_id = gps
 navsatfix_topic = /rtk/navsatfix
 pair_tolerance_seconds = 0.2
+timestamp_source = gprmc_utc
+signal_timeout_seconds = 2.0
 ```
 
 主要参数：
@@ -36,12 +45,14 @@ pair_tolerance_seconds = 0.2
 | `~frame_id` | `gps` | NavSatFix 坐标系名称 |
 | `~navsatfix_topic` | `/rtk/navsatfix` | 正式 NavSatFix 话题 |
 | `~pair_tolerance_seconds` | `0.2` | BESTPOSA 与 RMC 时间配对容差，秒 |
+| `~timestamp_source` | `gprmc_utc` | 时间戳来源：`gprmc_utc` 或 `system_now` |
+| `~signal_timeout_seconds` | `2.0` | 超过该时间没有有效输出时提示信号异常，秒 |
 
 ## 发布话题
 
 | 话题 | 类型 | 内容 |
 | --- | --- | --- |
-| `/rtk/navsatfix` | `sensor_msgs/NavSatFix` | BESTPOSA + RMC 合成后的正式消息 |
+| `/rtk/navsatfix` | `sensor_msgs/NavSatFix` | BESTPOSA 与时间戳模式对应时间源合成后的正式消息 |
 | `/rtk/raw_rmc` | `std_msgs/String` | 原始 RMC 字符串 |
 | `/rtk/raw_gga` | `std_msgs/String` | 原始 GGA 字符串 |
 | `/rtk/raw_bestposa` | `std_msgs/String` | 原始 `#BESTPOSA` 字符串 |
@@ -71,9 +82,53 @@ RMC 中的经纬度只作为解析结构中的可选信息保留，不用于正�
 - `pos_type` 有效且不是 `NONE`；
 - 经纬度、高程和三个位置标准差有效。
 
-BESTPOSA 的 GPS 周和周内秒会转换为 UTC，仅用于和 RMC 的 UTC 时间进行配对。正式 ROS 时间戳仍然来自 RMC。
+在 `gprmc_utc` 模式下，BESTPOSA 的 GPS 周和周内秒会转换为 UTC，仅用于和 RMC 的 UTC 时间进行配对，正式 ROS 时间戳来自 RMC。`system_now` 模式不要求 RMC。
 
-只有当 BESTPOSA 和 RMC 的时间差不超过 `pair_tolerance_seconds` 时，驱动才会发布 NavSatFix。发布成功后，两条缓存会清空，避免重复使用同一时间数据。
+### 时间戳模式
+
+#### `gprmc_utc`
+
+这是默认模式，发布条件保持不变：
+
+```text
+有效 BESTPOSA + 有效 GPRMC + BESTPOSA/RMC 时间匹配
+    -> 发布 NavSatFix
+    -> header.stamp 使用 GPRMC UTC 时间
+```
+
+`BESTPOSA` 的 GPS 周和周内秒会转换为 UTC，仅用于和 RMC 的 UTC 时间进行配对。正式 ROS 时间戳来自 RMC。
+
+#### `system_now`
+
+系统时间模式不要求等待 GPRMC：
+
+```text
+有效 BESTPOSA
+    -> 发布 NavSatFix
+    -> header.stamp 使用 ros::Time::now()
+```
+
+此时 GPRMC 仍然发布到 `/rtk/raw_rmc`，但不再是正式 NavSatFix 发布的必要条件。驱动使用 BESTPOSA 的 GPS 周和周内秒判断重复历元。
+
+`ros::Time::now()` 表示驱动接收或发布消息时的 ROS 时间，不等于 GNSS 观测发生的真实 UTC 时间。若用于 LIGO 建图，系统时钟应当已经通过 PPS、NTP 或其他方式与 GNSS 时间同步；否则优先使用 `gprmc_utc`。
+
+发布成功后，驱动会清空当前 BESTPOSA/RMC 缓存，避免重复使用同一时间数据。
+
+### 信号缺失提示
+
+驱动会持续检查有效定位数据和正式 NavSatFix 发布状态。超过 `signal_timeout_seconds` 没有有效 BESTPOSA 时，终端会节流提示：
+
+```text
+GNSS signal missing or no valid BESTPOSA; cannot publish NavSatFix
+```
+
+在 `gprmc_utc` 模式下，如果 BESTPOSA 持续有效但始终没有匹配的 GPRMC，还会提示：
+
+```text
+Valid BESTPOSA received, but no matching GPRMC; cannot publish NavSatFix in gprmc_utc mode
+```
+
+提示使用节流日志，不会在每次循环中重复刷屏。串口设备无法打开时，驱动仍会输出原有的串口打开失败提示。
 
 ## NavSatFix 字段映射
 
@@ -84,10 +139,10 @@ BESTPOSA 的 GPS 周和周内秒会转换为 UTC，仅用于和 RMC 的 UTC 时�
 | NavSatFix 字段 | 来源 |
 | --- | --- |
 | `header.seq` | 未由驱动显式设置，由 ROS 消息机制处理 |
-| `header.stamp` | RMC 的 UTC 日期和时间：`UTC date` + `UTC time` |
+| `header.stamp` | `gprmc_utc` 模式使用 RMC 的 UTC 日期和时间；`system_now` 模式使用 `ros::Time::now()` |
 | `header.frame_id` | ROS 私有参数 `~frame_id`，当前 launch 为 `gps` |
 
-`BESTPOSA` 的 GPS 周和周内秒只用于时间匹配，不直接作为最终 `header.stamp`。
+在 `gprmc_utc` 模式下，`BESTPOSA` 的 GPS 周和周内秒只用于时间匹配，不直接作为最终 `header.stamp`。在 `system_now` 模式下，BESTPOSA 的 GPS 历元用于重复消息判断。
 
 ### NavSatStatus
 
@@ -202,11 +257,12 @@ rostopic echo -n 1 /rtk/raw_bestposa
 
 正常情况下：
 
-1. `/rtk/navsatfix` 的时间戳来自 RMC UTC；
+1. 默认 `gprmc_utc` 模式下，`/rtk/navsatfix` 的时间戳来自 RMC UTC；`system_now` 模式下来自 `ros::Time::now()`；
 2. 经纬度、高程来自 BESTPOSA；
 3. 解状态来自 BESTPOSA；
 4. 协方差来自 BESTPOSA 三个标准差的平方；
-5. GGA 不会改变正式 NavSatFix 的位置和协方差。
+5. `gprmc_utc` 模式要求 BESTPOSA 与 RMC 时间匹配，`system_now` 模式不要求 RMC；
+6. GGA 不会改变正式 NavSatFix 的位置和协方差。
 
 ## 协议文档
 

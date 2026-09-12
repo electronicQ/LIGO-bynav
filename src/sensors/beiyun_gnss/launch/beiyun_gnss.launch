@@ -11,5 +11,9 @@
     <param name="navsatfix_topic" value="/rtk/navsatfix" />
     <!-- BESTPOSA GPS 时间与 RMC UTC 时间允许存在的最大偏差，单位秒。 -->
     <param name="pair_tolerance_seconds" value="0.2" />
+    <!-- gprmc_utc 保持当前配对逻辑；system_now 使用 ros::Time::now()。 -->
+    <param name="timestamp_source" value="gprmc_utc" />
+    <!-- 超过该时间没有有效输出时，在终端提示 GNSS 状态。 -->
+    <param name="signal_timeout_seconds" value="2.0" />
   </node>
 </launch>
